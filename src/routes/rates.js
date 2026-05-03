@@ -6,6 +6,11 @@ const router = express.Router();
 
 const VALID_TYPES = new Set(['bank', 'remittance', 'exchange']);
 
+const HIDDEN = new Set([
+  'Cambio Extranjero', 'SCT', 'Taveras', 'Moneycorps',
+  'Banco Central', 'DGII', 'Panora Exchange', 'Gamelin', 'Quezada',
+]);
+
 /**
  * GET /rates
  * GET /rates?type=bank
@@ -45,7 +50,7 @@ router.get('/', (req, res) => {
     query += ' ORDER BY buy_rate DESC NULLS LAST, sell_rate ASC NULLS LAST';
   }
 
-  const rows = db.prepare(query).all(...params);
+  const rows = db.prepare(query).all(...params).filter((r) => !HIDDEN.has(r.name));
   const result = { count: rows.length, data: rows };
 
   cache.set(cacheKey, result);

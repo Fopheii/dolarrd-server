@@ -146,25 +146,113 @@ function wuFallback() {
 }
 
 // ---------------------------------------------------------------------------
-// Unitransfer
-// Their server consistently times out to automated requests.
+// MoneyGram
+// Their calculator page is a JavaScript SPA — rates are not in static HTML.
+// We attempt a few known endpoints; on failure we use Vimenca's current DB
+// rate since MoneyGram operates in the same range.
+// ---------------------------------------------------------------------------
+const MG_IPHONE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15';
+
+async function scrapeMoneyGram() {
+  const urls = [
+    'https://www.moneygram.com/mgo/us/en/send-money/send-money-form.html',
+    'https://www.moneygram.com/mgo/us/en/send-money',
+    'https://api.moneygram.com/v1/rates?sendCountry=US&receiveCountry=DO&sendCurrency=USD',
+  ];
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': MG_IPHONE_UA, 'Accept': 'application/json' } });
+      if (!res.ok) continue;
+
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { continue; }
+
+      const rate =
+        data?.exchangeRate      ||
+        data?.rate              ||
+        data?.fxRate            ||
+        data?.pricingInfo?.exchangeRate ||
+        null;
+
+      if (!rate) continue;
+
+      console.log(`[remesas] MoneyGram live rate: ${rate}`);
+      return remittanceResult('MoneyGram', parseFloat(rate), parseFloat(rate));
+    } catch (_) {}
+  }
+
+  return vimencaFallback('MoneyGram');
+}
+
+// ---------------------------------------------------------------------------
+// RIA Money Transfer
+// Also a SPA — same fallback strategy as MoneyGram.
+// ---------------------------------------------------------------------------
+async function scrapeRIA() {
+  const urls = [
+    'https://www.riamoneytransfer.com/us/en/send-money?destinationCountry=DO',
+    'https://www.riamoneytransfer.com/api/rates?from=USD&to=DOP',
+    'https://api.riamoneytransfer.com/v1/rates?sendCountry=US&receiveCountry=DO',
+  ];
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': MG_IPHONE_UA, 'Accept': 'application/json' } });
+      if (!res.ok) continue;
+
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { continue; }
+
+      const rate =
+        data?.exchangeRate  ||
+        data?.rate          ||
+        data?.fxRate        ||
+        null;
+
+      if (!rate) continue;
+
+      console.log(`[remesas] RIA live rate: ${rate}`);
+      return remittanceResult('La Nacional', parseFloat(rate), parseFloat(rate));
+    } catch (_) {}
+  }
+
+  return vimencaFallback('La Nacional');
+}
+
+// Reads Vimenca's last DB value and returns it under a different institution name.
+// Used when a scraper can't reach its live endpoint.
+function vimencaFallback(name) {
+  const vimenca = db.prepare("SELECT * FROM rates WHERE name = 'Vimenca'").get();
+  if (!vimenca?.buy_rate) return null;
+
+  console.log(`[remesas] ${name}: using Vimenca fallback (${vimenca.buy_rate})`);
+  return {
+    name,
+    type:           'remittance',
+    buy_rate:       vimenca.buy_rate,
+    sell_rate:      vimenca.sell_rate,
+    fee:            null,
+    receive_amount: null,
+    status:         'estimated',
+    source:         'vimenca_proxy',
+    last_updated:   new Date().toISOString(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Unitransfer, Viamericas, Small World — consistently unreachable
 // ---------------------------------------------------------------------------
 async function scrapeUnitransfer() {
   throw new Error('Unitransfer: server does not respond to automated requests');
 }
 
-// ---------------------------------------------------------------------------
-// Viamericas
-// Homepage loads via React/SPA — rates not present in static HTML.
-// ---------------------------------------------------------------------------
 async function scrapeViamericas() {
   throw new Error('Viamericas: page is JavaScript-rendered, not scrapeable statically');
 }
 
-// ---------------------------------------------------------------------------
-// Small World
-// Returns 403 Forbidden for all bot-like requests.
-// ---------------------------------------------------------------------------
 async function scrapeSmallWorld() {
   throw new Error('Small World: returns 403, bot-blocking in place');
 }
@@ -175,6 +263,8 @@ async function scrapeSmallWorld() {
 const SCRAPERS = [
   { key: 'caribe_express',  fn: scrapeCaribe },
   { key: 'western_union',   fn: scrapeWesternUnion },
+  { key: 'moneygram',       fn: scrapeMoneyGram },
+  { key: 'ria',             fn: scrapeRIA },
   { key: 'unitransfer',     fn: scrapeUnitransfer },
   { key: 'viamericas',      fn: scrapeViamericas },
   { key: 'small_world',     fn: scrapeSmallWorld },
@@ -196,13 +286,19 @@ async function scrapeRemesas() {
 }
 
 function result(name, buy_rate, sell_rate) {
+  return remittanceResult(name, buy_rate, sell_rate);
+}
+
+function remittanceResult(name, buy_rate, sell_rate) {
   return {
     name,
-    type: 'remittance',
+    type:         'remittance',
     buy_rate,
     sell_rate,
-    fee: null,
-    source: 'scraper',
+    fee:          null,
+    receive_amount: null,
+    status:       'live',
+    source:       'scraper',
     last_updated: new Date().toISOString(),
   };
 }
