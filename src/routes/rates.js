@@ -23,6 +23,9 @@ router.get('/', (req, res) => {
     return res.status(400).json({ error: `Invalid type. Must be one of: ${[...VALID_TYPES].join(', ')}` });
   }
 
+  console.log('Total rows in DB:', db.prepare('SELECT COUNT(*) as count FROM rates').get());
+  console.log('WU row:', db.prepare("SELECT * FROM rates WHERE name LIKE '%Western%'").get());
+
   const cacheKey = `rates:${type ?? 'all'}:${sort ?? 'default'}`;
   const cached = cache.get(cacheKey);
   if (cached) return res.json(cached);
@@ -35,11 +38,11 @@ router.get('/', (req, res) => {
     params.push(type);
   }
 
+  // Rows with null rates (e.g. WU fallback stub) sort to the bottom via NULLS LAST
   if (sort === 'sell') {
-    query += ' AND sell_rate IS NOT NULL ORDER BY sell_rate ASC';
+    query += ' ORDER BY sell_rate ASC NULLS LAST';
   } else {
-    // Default: best buy rate first (highest), then best sell rate (lowest)
-    query += ' AND buy_rate IS NOT NULL ORDER BY buy_rate DESC, sell_rate ASC';
+    query += ' ORDER BY buy_rate DESC NULLS LAST, sell_rate ASC NULLS LAST';
   }
 
   const rows = db.prepare(query).all(...params);
