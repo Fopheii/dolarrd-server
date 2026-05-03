@@ -78,4 +78,30 @@ router.get('/best', (req, res) => {
   res.json(result);
 });
 
+/**
+ * POST /rates/update-wu
+ * Manually push a live Western Union rate (called from mobile app or admin).
+ * Flushes cache so the next GET /rates reflects the new value immediately.
+ */
+router.post('/update-wu', (req, res) => {
+  const { rate, fee, receive_amount } = req.body;
+
+  if (!rate || isNaN(rate)) {
+    return res.status(400).json({ error: 'Invalid rate' });
+  }
+
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    UPDATE rates
+    SET buy_rate = ?, sell_rate = ?, fee = ?, receive_amount = ?,
+        status = 'live', source = 'wu_api', last_updated = ?
+    WHERE name LIKE '%Western%'
+  `).run(parseFloat(rate), parseFloat(rate), fee ?? null, receive_amount ?? null, now);
+
+  cache.flushAll();
+
+  res.json({ success: true, rate: parseFloat(rate), updated_at: now });
+});
+
 module.exports = router;
