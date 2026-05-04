@@ -40,6 +40,14 @@ db.exec(`
     push_token      TEXT NOT NULL,
     created_at      TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS rate_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    institution TEXT    NOT NULL,
+    buy_rate    REAL,
+    sell_rate   REAL,
+    recorded_at TEXT    NOT NULL
+  );
 `);
 
 // Migrate existing databases:
@@ -84,6 +92,22 @@ if (!cols.includes('status')) {
   `);
 
   console.log('[db] Migrated rates table: added status column, relaxed source constraint');
+}
+
+// Migrate rate_history: old schema had best_buy_rate only — drop and recreate with per-institution schema
+const rhCols = db.pragma('table_info(rate_history)').map((c) => c.name);
+if (!rhCols.includes('institution')) {
+  db.exec(`
+    DROP TABLE IF EXISTS rate_history;
+    CREATE TABLE rate_history (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      institution TEXT    NOT NULL,
+      buy_rate    REAL,
+      sell_rate   REAL,
+      recorded_at TEXT    NOT NULL
+    );
+  `);
+  console.log('[db] Migrated rate_history: new per-institution schema');
 }
 
 module.exports = db;

@@ -91,6 +91,30 @@ async function runSync() {
 
     logStmt.run(lastSyncTimestamp, 'sync', totalUpdated, null);
     console.log(`[sync] Done — ${totalUpdated} records updated`);
+
+    // Snapshot all institutions into rate_history after each successful sync
+    const liveRates = db.prepare(`
+      SELECT name, buy_rate, sell_rate FROM rates
+      WHERE status != 'stub' AND (buy_rate IS NOT NULL OR sell_rate IS NOT NULL)
+    `).all();
+
+    const insertSnapshot = db.prepare(`
+      INSERT INTO rate_history (institution, buy_rate, sell_rate, recorded_at)
+      VALUES (@institution, @buy_rate, @sell_rate, @recorded_at)
+    `);
+
+    const insertAll = db.transaction((rows) => {
+      for (const row of rows) insertSnapshot.run(row);
+    });
+
+    insertAll(liveRates.map((r) => ({
+      institution:  r.name,
+      buy_rate:     r.buy_rate  ?? null,
+      sell_rate:    r.sell_rate ?? null,
+      recorded_at:  lastSyncTimestamp,
+    })));
+
+    console.log(`[sync] Snapshot recorded: ${liveRates.length} institutions`);
   } catch (err) {
     const ts = new Date().toISOString();
     logStmt.run(ts, 'sync', 0, err.message);

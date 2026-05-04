@@ -8,7 +8,7 @@ const VALID_TYPES = new Set(['bank', 'remittance', 'exchange']);
 
 const HIDDEN = new Set([
   'Cambio Extranjero', 'SCT', 'Taveras', 'Moneycorps',
-  'Banco Central', 'DGII', 'Panora Exchange', 'Gamelin', 'Quezada',
+  'Banco Central', 'DGII', 'Panora Exchange', 'Gamelin', 'Quezada', 'RM',
 ]);
 
 /**
@@ -27,9 +27,6 @@ router.get('/', (req, res) => {
   if (type && !VALID_TYPES.has(type)) {
     return res.status(400).json({ error: `Invalid type. Must be one of: ${[...VALID_TYPES].join(', ')}` });
   }
-
-  console.log('Total rows in DB:', db.prepare('SELECT COUNT(*) as count FROM rates').get());
-  console.log('WU row:', db.prepare("SELECT * FROM rates WHERE name LIKE '%Western%'").get());
 
   const cacheKey = `rates:${type ?? 'all'}:${sort ?? 'default'}`;
   const cached = cache.get(cacheKey);
@@ -107,6 +104,24 @@ router.post('/update-wu', (req, res) => {
   cache.flushAll();
 
   res.json({ success: true, rate: parseFloat(rate), updated_at: now });
+});
+
+/**
+ * GET /rates/history?days=7
+ * Returns flat rows ordered by time ascending.
+ */
+router.get('/history', (req, res) => {
+  const days  = parseInt(req.query.days) || 7;
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  const rows = db.prepare(`
+    SELECT recorded_at, institution, buy_rate, sell_rate
+    FROM   rate_history
+    WHERE  recorded_at >= ?
+    ORDER  BY recorded_at ASC
+  `).all(since);
+
+  res.json({ count: rows.length, data: rows });
 });
 
 module.exports = router;
