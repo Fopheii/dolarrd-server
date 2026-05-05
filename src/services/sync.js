@@ -4,8 +4,37 @@ const { fetchTasareal } = require('./tasareal');
 const { scrapeBanreservas } = require('../scrapers/banreservas');
 const { scrapeBancentral } = require('../scrapers/bancentral');
 const { scrapeRemesas } = require('../scrapers/remesas');
+const { runNotifications } = require('./notifications');
 
 let lastSyncTimestamp = null;
+
+// ─── Weighted market average ──────────────────────────────────────────────────
+const WEIGHTS = {
+  'Banco Popular':  0.25,
+  'Banreservas':    0.25,
+  'BHD León':       0.20,
+  'Caribe Express': 0.15,
+  'Western Union':  0.10,
+  'Vimenca':        0.05,
+};
+
+function calcMarketAverage(rates) {
+  const now = Date.now();
+  let weightedSum = 0;
+  let totalWeight = 0;
+
+  for (const [name, weight] of Object.entries(WEIGHTS)) {
+    const r = rates.find((x) => x.name === name);
+    if (!r || !r.buy_rate) continue;
+    // Skip stale data (>24h)
+    if (now - new Date(r.last_updated).getTime() > 86_400_000) continue;
+    weightedSum += r.buy_rate * weight;
+    totalWeight += weight;
+  }
+
+  if (totalWeight < 0.3) return null; // fewer than ~3 sources available
+  return weightedSum / totalWeight;
+}
 
 // Persists across sync cycles within the same process.
 // Starts at the midpoint of the 0.25–0.45 range.
@@ -115,6 +144,26 @@ async function runSync() {
     })));
 
     console.log(`[sync] Snapshot recorded: ${liveRates.length} institutions`);
+
+    // Weighted market average → rate_history as 'Mercado'
+    const allRatesForAvg = db.prepare('SELECT * FROM rates WHERE status != ?').all('stub');
+    const marketAvg = calcMarketAverage(allRatesForAvg);
+    if (marketAvg != null) {
+      const avgRate = parseFloat(marketAvg.toFixed(4));
+      insertSnapshot.run({
+        institution:  'Mercado',
+        buy_rate:     avgRate,
+        sell_rate:    null,
+        recorded_at:  lastSyncTimestamp,
+      });
+      console.log(`[sync] Market average saved: ${avgRate}`);
+    } else {
+      console.warn('[sync] Market average skipped — insufficient sources');
+    }
+
+    // Run smart notifications after every successful sync (non-blocking)
+    const allRates = db.prepare('SELECT * FROM rates WHERE status != ?').all('stub');
+    runNotifications(allRates).catch((e) => console.error('[notify] Unhandled:', e.message));
   } catch (err) {
     const ts = new Date().toISOString();
     logStmt.run(ts, 'sync', 0, err.message);

@@ -38,7 +38,11 @@ async function scrapeCaribe() {
 
   if (buy_rate === null) throw new Error('Caribe Express: USD buy rate not found');
 
-  return result('Caribe Express', buy_rate, null);
+  const sell_rate = buy_rate + 2.5;
+  return {
+    ...result('Caribe Express', buy_rate, sell_rate),
+    status: 'estimated', // sell_rate is derived, not scraped directly
+  };
 }
 
 // ---------------------------------------------------------------------------
