@@ -1,42 +1,51 @@
 const express = require('express');
 const router = express.Router();
+const { execFileSync } = require('child_process');
 
-// tikmate API returns: { success, id, token, desc, cover }
-// There is no author field — extract @username from the TikTok URL path.
-function authorFromUrl(url) {
-  try {
-    const match = new URL(url).pathname.match(/\/@([^/]+)/);
-    return match ? '@' + match[1] : null;
-  } catch {
-    return null;
-  }
-}
-
-router.post('/', async (req, res) => {
+router.post('/', (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL required' });
 
   try {
-    const response = await fetch('https://api.tikmate.app/api/lookup', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `url=${encodeURIComponent(url)}`
-    });
-    const data = await response.json();
+    const raw = execFileSync('python3', [
+      '-m', 'yt_dlp',
+      '--dump-json',
+      '--no-playlist',
+      '--impersonate', 'Chrome-133',
+      url
+    ], { timeout: 30000 }).toString();
 
-    if (!data.success) {
-      return res.status(422).json({ error: data.message || 'Could not process this video.' });
-    }
+    const data = JSON.parse(raw);
+    const formats = data.formats || [];
+
+    // Best HD format (highest quality, no watermark)
+    const hdFormat = formats
+      .filter(f => f.vcodec !== 'none' && f.height)
+      .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
+    // SD format
+    const sdFormat = formats
+      .filter(f => f.vcodec !== 'none' && f.height)
+      .sort((a, b) => (a.height || 0) - (b.height || 0))[0];
+
+    // Audio only
+    const audioFormat = formats
+      .find(f => f.vcodec === 'none' && f.acodec !== 'none');
 
     res.json({
       success: true,
       video: {
-        title: data.desc,
-        author: authorFromUrl(url),
-        thumbnail: data.cover,
-        mp4_url: `https://tikmate.app/download/${data.token}/${data.id}.mp4`,
-        mp4_hd_url: `https://tikmate.app/download/${data.token}/${data.id}.mp4?hd=1`,
-        mp3_url: `https://tikmate.app/download/${data.token}/${data.id}.mp3`,
+        title: data.description || data.title,
+        author: '@' + (data.uploader || ''),
+        thumbnail: data.thumbnail,
+        duration: data.duration,
+        view_count: data.view_count,
+        like_count: data.like_count,
+        mp4_url: sdFormat?.url || data.url,
+        mp4_hd_url: hdFormat?.url || data.url,
+        mp3_url: audioFormat?.url || null,
+        width: hdFormat?.width,
+        height: hdFormat?.height,
       }
     });
   } catch (e) {
