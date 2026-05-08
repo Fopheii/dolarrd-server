@@ -1,6 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const { execFileSync, spawn } = require('child_process');
+const fs   = require('fs');
+const path = require('path');
+const os   = require('os');
 
 const IMPERSONATE_TARGETS = ['Chrome-133', 'Chrome-124', 'Safari-18.4'];
 
@@ -18,8 +21,34 @@ router.get('/stream', (req, res) => {
   ];
 
   if (format === 'mp3') {
-    args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
-  } else if (format === 'hd') {
+    const tmpBase = path.join(os.tmpdir(), `dl_${Date.now()}`);
+    const tmpFile = `${tmpBase}.mp3`;
+
+    try {
+      execFileSync('python3', [
+        '-m', 'yt_dlp',
+        '--impersonate', 'Chrome-133',
+        '--no-playlist',
+        '-x', '--audio-format', 'mp3',
+        '--audio-quality', '0',
+        '-o', `${tmpBase}.%(ext)s`,
+        url
+      ], { timeout: 60000 });
+    } catch (e) {
+      return res.status(500).json({ error: 'Audio extraction failed.' });
+    }
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Disposition', 'attachment; filename="audio.mp3"');
+
+    const stream = fs.createReadStream(tmpFile);
+    stream.pipe(res);
+    stream.on('end', () => fs.unlink(tmpFile, () => {}));
+    stream.on('error', () => res.status(500).end());
+    return;
+  }
+
+  if (format === 'hd') {
     args.push('-f', 'bytevc1_1080p/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best');
   } else {
     args.push('-f', 'h264_540p/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best');
@@ -28,8 +57,8 @@ router.get('/stream', (req, res) => {
   // URL must come after all flags
   args.push(url);
 
-  res.setHeader('Content-Type', format === 'mp3' ? 'audio/mpeg' : 'video/mp4');
-  res.setHeader('Content-Disposition', `attachment; filename="video.${format === 'mp3' ? 'mp3' : 'mp4'}"`);
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Disposition', 'attachment; filename="video.mp4"');
 
   const proc = spawn('python3', args);
   proc.stdout.pipe(res);
