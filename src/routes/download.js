@@ -18,11 +18,11 @@ router.get('/stream', (req, res) => {
   ];
 
   if (format === 'mp3') {
-    args.push('-x', '--audio-format', 'mp3');
+    args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
   } else if (format === 'hd') {
-    args.push('-f', 'bestvideo[ext=mp4]+bestaudio/best[ext=mp4]');
+    args.push('-f', 'bytevc1_1080p/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best');
   } else {
-    args.push('-f', 'worst[ext=mp4]/worst');
+    args.push('-f', 'h264_540p/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best');
   }
 
   // URL must come after all flags
