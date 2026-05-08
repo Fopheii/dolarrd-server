@@ -7,9 +7,11 @@ router.post('/', async (req, res) => {
   if (!url) return res.status(400).json({ error: 'URL required' });
 
   try {
-    const raw = execFileSync('yt-dlp', [
+    const raw = execFileSync('python3', [
+      '-m', 'yt_dlp',
       '--dump-json',
       '--no-playlist',
+      '--impersonate', 'chrome',
       url
     ], { timeout: 30000 }).toString();
 
