@@ -2,6 +2,7 @@ const express = require('express');
 const ratesRouter = require('./routes/rates');
 const alertsRouter = require('./routes/alerts');
 const syncRouter = require('./routes/sync');
+const downloadRouter = require('./routes/download');
 const { getLastSyncTimestamp } = require('./services/sync');
 
 const app = express();
@@ -11,6 +12,7 @@ app.use(express.json());
 app.use('/rates', ratesRouter);
 app.use('/alerts', alertsRouter);
 app.use('/sync', syncRouter);
+app.use('/download', downloadRouter);
 
 app.get('/health', (req, res) => {
   res.json({
