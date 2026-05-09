@@ -10,8 +10,8 @@ const app = require('./app');
 const { runSync } = require('./services/sync');
 
 const PORT = process.env.PORT || 3000;
-// Sync every 20 minutes. Adjust via SYNC_CRON env var.
-const SYNC_CRON = process.env.SYNC_CRON || '*/20 * * * *';
+// Sync every 5 minutes. Adjust via SYNC_CRON env var.
+const SYNC_CRON = process.env.SYNC_CRON || '*/5 * * * *';
 
 app.listen(PORT, async () => {
   console.log(`[server] Listening on port ${PORT}`);
