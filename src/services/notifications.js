@@ -1,27 +1,31 @@
 /**
- * Smart notification service.
+ * Push notification service — server-side delivery via Expo Push API.
  *
- * Rules:
- *  1. Best-institution notification  — fired when a new #1 takes the lead
- *  2. Market movement notification   — fired when best rate shifts ±0.30+
- *  3. User alert notifications       — fired when user-defined threshold is crossed
+ * Notification types (all in Spanish):
+ *  1. Market movement  — fires when market average shifts ≥ 0.50 DOP
+ *  2. Best-rate leader — fires when a new institution takes the top spot
+ *  3. Daily digest     — best rate of the day, sent at 9 AM (triggered by cron)
+ *  4. User alerts      — custom threshold alerts registered via POST /alerts
  *
- * Frequency guard: rules 1 & 2 fire at most once per 8 hours (system-level).
- * User alerts fire every time their condition is satisfied (deduplicated by alert id).
+ * Frequency guards:
+ *  - Rules 1 & 2 share an 8-hour cooldown (one system alert per 8 h max)
+ *  - Rule 4 fires once per alert (stored in notified_alerts) — auto-resets daily
+ *
+ * Invalid tokens returned by Expo are automatically purged from device_tokens.
  */
 
 const db = require('../db');
 
 const EXPO_PUSH_URL   = 'https://exp.host/--/api/v2/push/send';
-const MOVE_THRESHOLD  = 0.30;   // minimum rate change to trigger market alert
-const SYSTEM_COOLDOWN = 8 * 60 * 60 * 1000; // 8 hours in ms
+const MOVE_THRESHOLD  = 0.50;                  // RD$ — triggers market movement alert
+const SYSTEM_COOLDOWN = 8 * 60 * 60 * 1000;   // 8 hours in ms
 
-// ── Persist state between sync cycles ─────────────────────────────────────────
-// These survive process restarts via the notifications_state table (see ensureTable).
-let _lastLeader    = null;   // name of the last #1 institution
-let _lastBestRate  = null;   // best buy rate at last system notification
-let _lastSystemTs  = 0;      // ms timestamp of last system (rule 1/2) notification
+// ── In-process state (also persisted in notification_state) ───────────────────
+let _lastLeader   = null;
+let _lastBestRate = null;
+let _lastSystemTs = 0;
 
+// ── Schema bootstrap ──────────────────────────────────────────────────────────
 function ensureTable() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS notification_state (
@@ -38,7 +42,7 @@ function ensureTable() {
   const get = (k) => db.prepare('SELECT value FROM notification_state WHERE key = ?').get(k)?.value;
   _lastLeader   = get('last_leader')   ?? null;
   _lastBestRate = parseFloat(get('last_best_rate') ?? '0') || null;
-  _lastSystemTs = parseInt(get('last_system_ts') ?? '0', 10) || 0;
+  _lastSystemTs = parseInt(get('last_system_ts')   ?? '0', 10) || 0;
 }
 
 function saveState(key, value) {
@@ -48,52 +52,107 @@ function saveState(key, value) {
   `).run(key, String(value));
 }
 
+// ── Token helpers ─────────────────────────────────────────────────────────────
+function getAllDeviceTokens() {
+  return db.prepare('SELECT token FROM device_tokens').all().map((r) => r.token);
+}
+
+/**
+ * Purge tokens that Expo says are no longer valid.
+ * Called after every batch push.
+ */
+function purgeInvalidTokens(tokens, expoData) {
+  if (!Array.isArray(expoData)) return;
+  expoData.forEach((receipt, i) => {
+    if (
+      receipt.status === 'error' &&
+      (receipt.details?.error === 'DeviceNotRegistered' ||
+       receipt.details?.error === 'InvalidCredentials')
+    ) {
+      const bad = tokens[i];
+      if (bad) {
+        db.prepare('DELETE FROM device_tokens WHERE token = ?').run(bad);
+        db.prepare('DELETE FROM alerts WHERE push_token = ?').run(bad);
+        console.log(`[notify] Purged invalid token: ${bad.slice(0, 30)}…`);
+      }
+    }
+  });
+}
+
 // ── Expo push sender ──────────────────────────────────────────────────────────
-async function sendPush(tokens, title, body) {
+/**
+ * Send a batch of push notifications via Expo's Push API.
+ * Automatically removes invalid tokens from the DB.
+ */
+async function sendPush(tokens, title, body, data = {}) {
   if (!tokens || tokens.length === 0) return;
 
-  const messages = tokens.map((to) => ({ to, title, body, sound: 'default' }));
+  const messages = tokens.map((to) => ({
+    to,
+    title,
+    body,
+    sound: 'default',
+    data,
+  }));
 
   try {
-    const res = await fetch(EXPO_PUSH_URL, {
+    const res  = await fetch(EXPO_PUSH_URL, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body:    JSON.stringify(messages),
     });
     const json = await res.json();
-    console.log(`[notify] Sent ${messages.length} push(es):`, json?.data?.map(d => d.status));
+    const statuses = (json?.data ?? []).map((d) => d.status);
+    console.log(`[notify] Sent ${messages.length} push(es):`, statuses);
+    purgeInvalidTokens(tokens, json?.data);
   } catch (err) {
     console.error('[notify] Push failed:', err.message);
   }
 }
 
-// Collect all unique push tokens from the alerts table
-function getAllTokens() {
-  return db.prepare('SELECT DISTINCT push_token FROM alerts').all().map(r => r.push_token);
+// ── Formatting helpers ────────────────────────────────────────────────────────
+/**
+ * Format a DOP rate delta into natural Spanish.
+ * 0.60  →  "60 centavos"
+ * 1.20  →  "1 peso con 20 centavos"
+ * 2.00  →  "2 pesos"
+ */
+function formatDelta(delta) {
+  const abs       = Math.abs(delta);
+  const pesos     = Math.floor(abs);
+  const centavos  = Math.round((abs - pesos) * 100);
+
+  if (pesos === 0) {
+    return `${centavos} centavo${centavos !== 1 ? 's' : ''}`;
+  }
+  if (centavos === 0) {
+    return `${pesos} peso${pesos !== 1 ? 's' : ''}`;
+  }
+  return `${pesos} peso${pesos !== 1 ? 's' : ''} con ${centavos} centavos`;
 }
 
-// ── Rule 1 + 2: system notifications ─────────────────────────────────────────
+// ── Rule 1 + 2: system notifications (market movement / leader change) ────────
 async function checkSystemNotifications(rates) {
   if (!rates || rates.length === 0) return;
 
   const now = Date.now();
   if (now - _lastSystemTs < SYSTEM_COOLDOWN) return; // cooldown active
 
-  // Find #1 by buy_rate
-  const live = rates.filter(r => r.buy_rate != null && r.status !== 'stub');
+  const live = rates.filter((r) => r.buy_rate != null && r.status !== 'stub');
   if (!live.length) return;
   live.sort((a, b) => b.buy_rate - a.buy_rate);
   const leader = live[0];
 
-  const tokens = getAllTokens();
+  const tokens = getAllDeviceTokens();
   if (!tokens.length) return;
 
-  // Rule 1: leader changed
+  // Rule 1: leader changed → announce new best institution
   if (_lastLeader && _lastLeader !== leader.name) {
     await sendPush(
       tokens,
-      '🔄 Nueva mejor opción',
-      `Ahora ${leader.name} da la mejor tasa: RD$ ${leader.buy_rate.toFixed(2)}`
+      `⭐ Nueva mejor tasa disponible`,
+      `${leader.name} ofrece RD$${leader.buy_rate.toFixed(2)} — la mejor opción ahora mismo.`,
+      { screen: 'Inicio' }
     );
     _lastLeader   = leader.name;
     _lastBestRate = leader.buy_rate;
@@ -101,18 +160,23 @@ async function checkSystemNotifications(rates) {
     saveState('last_leader',    leader.name);
     saveState('last_best_rate', leader.buy_rate);
     saveState('last_system_ts', now);
-    return; // only one system notification per cycle
+    return;
   }
 
-  // Rule 2: significant market movement (even if same leader)
+  // Rule 2: significant market movement
   if (_lastBestRate != null) {
     const delta = leader.buy_rate - _lastBestRate;
     if (Math.abs(delta) >= MOVE_THRESHOLD) {
-      const direction = delta > 0 ? '📈 sube' : '📉 baja';
+      const subio = delta > 0;
+      const emoji = subio ? '📈' : '📉';
+      const verb  = subio ? 'subió' : 'bajó';
+      const amount = formatDelta(delta);
+
       await sendPush(
         tokens,
-        `El dólar ${direction}`,
-        `${delta > 0 ? '+' : ''}${delta.toFixed(2)} hoy — mejor tasa: ${leader.name} (RD$ ${leader.buy_rate.toFixed(2)})`
+        `${emoji} El dólar ${verb} ${amount}`,
+        `La mejor tasa ahora es RD$${leader.buy_rate.toFixed(2)} en ${leader.name}.`,
+        { screen: 'Inicio' }
       );
       _lastBestRate = leader.buy_rate;
       _lastSystemTs = now;
@@ -122,17 +186,46 @@ async function checkSystemNotifications(rates) {
     }
   }
 
-  // Initialise state silently on first run
+  // First run — initialise state silently, no push
   if (!_lastLeader) {
     _lastLeader   = leader.name;
     _lastBestRate = leader.buy_rate;
     saveState('last_leader',    leader.name);
     saveState('last_best_rate', leader.buy_rate);
-    console.log(`[notify] Initialised leader: ${leader.name} @ ${leader.buy_rate}`);
+    console.log(`[notify] Initialised: ${leader.name} @ ${leader.buy_rate}`);
   }
 }
 
-// ── Rule 3: user alert notifications ─────────────────────────────────────────
+// ── Rule 3: daily digest (called by 9 AM cron in index.js) ───────────────────
+async function sendDailyDigest() {
+  ensureTable();
+
+  const tokens = getAllDeviceTokens();
+  if (!tokens.length) {
+    console.log('[notify] Daily digest: no registered devices.');
+    return;
+  }
+
+  const live = db
+    .prepare(`SELECT * FROM rates WHERE status != 'stub' AND buy_rate IS NOT NULL ORDER BY buy_rate DESC LIMIT 1`)
+    .get();
+
+  if (!live) {
+    console.log('[notify] Daily digest: no live rate data.');
+    return;
+  }
+
+  await sendPush(
+    tokens,
+    `⭐ La mejor tasa hoy es RD$${live.buy_rate.toFixed(2)}`,
+    `${live.name} ofrece la tasa más alta del mercado ahora mismo. ¡Abre la app para ver todos los cambios!`,
+    { screen: 'Inicio' }
+  );
+
+  console.log(`[notify] Daily digest sent to ${tokens.length} device(s): ${live.name} @ ${live.buy_rate}`);
+}
+
+// ── Rule 4: user custom alert notifications ───────────────────────────────────
 async function checkUserAlerts(rates) {
   if (!rates || rates.length === 0) return;
 
@@ -140,8 +233,12 @@ async function checkUserAlerts(rates) {
   if (!alerts.length) return;
 
   const alreadyNotified = new Set(
-    db.prepare('SELECT alert_id FROM notified_alerts').all().map(r => r.alert_id)
+    db.prepare('SELECT alert_id FROM notified_alerts').all().map((r) => r.alert_id)
   );
+
+  // Reset triggered alerts daily (so they can fire again the next day)
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  db.prepare('DELETE FROM notified_alerts WHERE notified_at < ?').run(cutoff);
 
   const markNotified = db.prepare(`
     INSERT OR IGNORE INTO notified_alerts (alert_id, notified_at) VALUES (?, ?)
@@ -150,33 +247,38 @@ async function checkUserAlerts(rates) {
   for (const alert of alerts) {
     if (alreadyNotified.has(alert.id)) continue;
 
-    // Match by entity_name (case-insensitive)
-    const inst = rates.find(r =>
-      r.name.toLowerCase() === alert.entity_name.toLowerCase()
+    const inst = rates.find(
+      (r) => r.name.toLowerCase() === alert.entity_name.toLowerCase()
     );
     if (!inst) continue;
 
     const currentRate = alert.direction === 'buy' ? inst.buy_rate : inst.sell_rate;
     if (currentRate == null) continue;
 
+    // buy alerts fire when rate reaches or exceeds threshold
+    // sell alerts fire when rate drops to or below threshold
     const triggered =
       (alert.direction === 'buy'  && currentRate >= alert.threshold_rate) ||
       (alert.direction === 'sell' && currentRate <= alert.threshold_rate);
 
     if (!triggered) continue;
 
+    const symbol = alert.direction === 'buy' ? '📈' : '📉';
+    const label  = alert.direction === 'buy' ? 'compra' : 'venta';
+
     await sendPush(
       [alert.push_token],
-      '🚨 Alerta de tasa',
-      `${inst.name} llegó a RD$ ${currentRate.toFixed(2)} como pediste`
+      `🔔 Tu alerta se activó`,
+      `${inst.name} llegó a RD$${currentRate.toFixed(2)} de ${label}. ¡Es tu momento!`,
+      { screen: 'Inicio', alertId: alert.id }
     );
 
     markNotified.run(alert.id, new Date().toISOString());
-    console.log(`[notify] User alert ${alert.id} fired for ${inst.name} @ ${currentRate}`);
+    console.log(`[notify] User alert ${alert.id} fired: ${inst.name} @ ${currentRate}`);
   }
 }
 
-// ── Main entry point ──────────────────────────────────────────────────────────
+// ── Main entry point (called after every rate sync) ───────────────────────────
 async function runNotifications(rates) {
   try {
     ensureTable();
@@ -187,4 +289,4 @@ async function runNotifications(rates) {
   }
 }
 
-module.exports = { runNotifications };
+module.exports = { runNotifications, sendDailyDigest };

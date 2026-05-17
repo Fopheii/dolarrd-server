@@ -8,6 +8,7 @@ if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 const cron = require('node-cron');
 const app = require('./app');
 const { runSync } = require('./services/sync');
+const { sendDailyDigest } = require('./services/notifications');
 
 const PORT = process.env.PORT || 3000;
 // Sync every 5 minutes. Adjust via SYNC_CRON env var.
@@ -31,5 +32,15 @@ app.listen(PORT, async () => {
     }
   });
 
-  console.log(`[server] Cron scheduled: ${SYNC_CRON}`);
+  // Daily digest at 9:00 AM (server local time — Contabo is UTC, RD is UTC-4)
+  // '0 13 * * *' UTC = 9:00 AM Santo Domingo time
+  cron.schedule('0 13 * * *', async () => {
+    try {
+      await sendDailyDigest();
+    } catch (err) {
+      console.error('[cron] Daily digest error:', err.message);
+    }
+  });
+
+  console.log(`[server] Cron scheduled: ${SYNC_CRON} | Daily digest: 9:00 AM RD`);
 });

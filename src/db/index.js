@@ -48,6 +48,13 @@ db.exec(`
     sell_rate   REAL,
     recorded_at TEXT    NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS device_tokens (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    token         TEXT NOT NULL UNIQUE,
+    registered_at TEXT NOT NULL,
+    last_seen     TEXT NOT NULL
+  );
 `);
 
 // Migrate existing databases:
