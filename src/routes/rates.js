@@ -107,6 +107,40 @@ router.post('/update-wu', (req, res) => {
 });
 
 /**
+ * GET /rates/widget
+ * Lightweight endpoint for the iOS home screen widget.
+ *
+ * Returns the best visible buy rate WITHOUT the institution name — intentionally
+ * teasing the user so they open the app to find out which bank has that rate.
+ *
+ * Response: { best_rate, rates_count, updated_at }
+ */
+router.get('/widget', (req, res) => {
+  const cached = cache.get('rates:widget');
+  if (cached) return res.json(cached);
+
+  const rows = db
+    .prepare(`SELECT name, buy_rate, last_updated FROM rates
+              WHERE status != 'stub' AND buy_rate IS NOT NULL
+              ORDER BY buy_rate DESC`)
+    .all()
+    .filter((r) => !HIDDEN.has(r.name));
+
+  if (!rows.length) {
+    return res.json({ best_rate: null, rates_count: 0, updated_at: null });
+  }
+
+  const result = {
+    best_rate:   rows[0].buy_rate,
+    rates_count: rows.length,
+    updated_at:  rows[0].last_updated,
+  };
+
+  cache.set('rates:widget', result);
+  res.json(result);
+});
+
+/**
  * GET /rates/history?days=7
  * Returns flat rows ordered by time ascending.
  */
