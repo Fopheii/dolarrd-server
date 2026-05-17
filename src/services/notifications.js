@@ -278,11 +278,92 @@ async function checkUserAlerts(rates) {
   }
 }
 
+// ── Rule 5: smart historical alerts (30-day high / low) ──────────────────────
+//
+// Fires at most ONCE PER DAY. Compares the current best market rate against
+// the 30-day min/max from rate_history (Mercado weighted average).
+// Threshold: rate must be within the bottom or top 10% of the 30-day range.
+//
+// Messages (Spanish only):
+//   Low  → "📉 El dólar está en su punto más bajo en 30 días. RD$X — buen momento para comprar."
+//   High → "📈 El dólar está en su punto más alto en 30 días. RD$X"
+
+// Institutions excluded from "best market rate" calculation (same as routes/rates.js HIDDEN)
+const SMART_HIDDEN = new Set([
+  'Cambio Extranjero', 'SCT', 'Taveras', 'Moneycorps',
+  'Banco Central', 'DGII', 'Panora Exchange', 'Gamelin', 'Quezada', 'RM',
+]);
+
+async function checkSmartAlerts(rates) {
+  if (!rates || rates.length === 0) return;
+
+  // Once-per-day guard — store today's ISO date string in notification_state
+  const today    = new Date().toISOString().slice(0, 10); // "2026-05-17"
+  const lastDate = db.prepare(
+    'SELECT value FROM notification_state WHERE key = ?'
+  ).get('smart_alert_date')?.value;
+  if (lastDate === today) return;
+
+  // Current best visible buy rate
+  const visible = rates
+    .filter((r) => r.buy_rate != null && r.status !== 'stub' && !SMART_HIDDEN.has(r.name))
+    .sort((a, b) => b.buy_rate - a.buy_rate);
+  if (!visible.length) return;
+
+  const currentRate = visible[0].buy_rate;
+
+  // Last 30 days of Mercado weighted-average history
+  const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+  const history = db.prepare(`
+    SELECT buy_rate FROM rate_history
+    WHERE  institution = 'Mercado'
+      AND  recorded_at >= ?
+      AND  buy_rate    IS NOT NULL
+    ORDER  BY recorded_at ASC
+  `).all(since);
+
+  // Need at least 7 data points to be meaningful
+  if (history.length < 7) return;
+
+  const histRates = history.map((r) => r.buy_rate);
+  const min30     = Math.min(...histRates);
+  const max30     = Math.max(...histRates);
+  const range     = max30 - min30;
+
+  // Skip if market was essentially flat (< 0.10 DOP range over 30 days)
+  if (range < 0.10) return;
+
+  const tokens = getAllDeviceTokens();
+  if (!tokens.length) return;
+
+  // Bottom 10% of 30-day range → historic low alert
+  const lowThreshold  = min30 + range * 0.10;
+  // Top 10% of 30-day range → historic high alert
+  const highThreshold = max30 - range * 0.10;
+
+  let title, body;
+
+  if (currentRate <= lowThreshold) {
+    title = `📉 El dólar en su punto más bajo en 30 días`;
+    body  = `RD$${currentRate.toFixed(2)} — buen momento para comprar dólares ahora.`;
+  } else if (currentRate >= highThreshold) {
+    title = `📈 El dólar en su punto más alto en 30 días`;
+    body  = `RD$${currentRate.toFixed(2)} — considera esperar si puedes.`;
+  } else {
+    return; // rate is in the middle range — no alert
+  }
+
+  await sendPush(tokens, title, body, { screen: 'Inicio' });
+  saveState('smart_alert_date', today);
+  console.log(`[notify] Smart alert sent (${currentRate.toFixed(2)} vs 30d range ${min30.toFixed(2)}–${max30.toFixed(2)}): ${title}`);
+}
+
 // ── Main entry point (called after every rate sync) ───────────────────────────
 async function runNotifications(rates) {
   try {
     ensureTable();
     await checkSystemNotifications(rates);
+    await checkSmartAlerts(rates);
     await checkUserAlerts(rates);
   } catch (err) {
     console.error('[notify] Error:', err.message);
